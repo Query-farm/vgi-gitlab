@@ -1,0 +1,38 @@
+# vgi-lint settings for this worker: https://github.com/Query-farm/vgi-lint-check
+# `make lint-explain`, `vgi-lint lint` in this directory, and CI's metadata job all
+# read this file. Look up a rule with `vgi-lint explain VGI123`; print the metadata tag
+# contract with `vgi-lint spec`.
+
+# The worker to attach, relative to this directory. Build it first with `make build`.
+location = ".venv/bin/vgi-gitlab-worker"
+
+# Fail on warnings while you build. Raise this to "info" before you publish the worker.
+fail_on = "info"
+
+# Waive a finding only with a kind and a reason, so the waiver can be audited:
+#   domain-exemption  permanent and legitimate for this worker
+#   deferred          a real defect you will fix; add expires = "YYYY-MM-DD"
+#   timing            slow or flaky because of the environment, not the metadata
+#   tooling-bug       the linter is wrong; report it upstream
+ignore = [
+  # { code = "VGI146", kind = "domain-exemption", reason = "every entry point needs a key" },
+]
+
+# VGI808 guesses a foreign key from a `<base>_id` column name. In the unified tables run_id and
+# task_run_id are each table's own primary key (task_runs.run_id -> runs is declared).
+[per_object."gitlab.unified.runs"]
+ignore = [{ code = "VGI808", kind = "tooling-bug", reason = "run_id is this table's own primary key" }]
+[per_object."gitlab.unified.task_runs"]
+ignore = [{ code = "VGI808", kind = "tooling-bug", reason = "task_run_id is this table's own primary key; its run_id FK to runs is declared" }]
+
+# Adopting the gate on a worker that already has findings? Record them once with
+#   vgi-lint lint --baseline vgi-lint-baseline --update-baseline
+# and uncomment the next line. Only new findings fail after that.
+# baseline = "vgi-lint-baseline"
+
+# Credential-gated: every example reads a GitLab instance (gitlab.com or a self-managed one,
+# private projects through a `gitlab` secret), so the execution rules (VGI9xx) would only measure
+# a live third-party API. Lint statically; the SQL suite (test/sql, against the GitLab replay in
+# test/mock_api) is the behavioural gate.
+[execution]
+enabled = false

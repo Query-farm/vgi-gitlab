@@ -1,0 +1,180 @@
+# name: test/sql/unified.test
+# description: gitlab.unified.runs / task_runs (the cross-orchestrator shape) against the GitLab replay
+# group: [gitlab]
+
+require vgi
+
+require-env GITLAB_WORKER
+
+require-env GITLAB_MOCK_API
+
+# Timestamps below are written in UTC.
+statement ok
+LOAD icu;
+
+statement ok
+SET TimeZone = 'UTC';
+
+statement ok
+ATTACH 'gitlab' (TYPE vgi, LOCATION '{GITLAB_WORKER}');
+
+statement ok
+CREATE SECRET gl (TYPE gitlab, TOKEN 'glpat-fixture', BASE_URL '{GITLAB_MOCK_API}');
+
+# No scope: neither a pipeline / run_id filter nor an ATTACH option.
+statement error
+SELECT count(*) FROM gitlab.unified.runs;
+----
+<REGEX>:.*needs a project scope.*
+
+statement error
+SELECT count(*) FROM gitlab.unified.task_runs;
+----
+<REGEX>:.*needs a project scope.*
+
+query TTTTTT
+SELECT orchestrator, run_id, pipeline, status, raw_status, trigger FROM gitlab.unified.runs WHERE pipeline = 'acme/widgets' ORDER BY run_id;
+----
+gitlab	acme/widgets/5001	acme/widgets	success	success	api
+gitlab	acme/widgets/5002	acme/widgets	failed	failed	event
+gitlab	acme/widgets/5003	acme/widgets	cancelled	canceled	event
+gitlab	acme/widgets/5004	acme/widgets	success	success	schedule
+gitlab	acme/widgets/5005	acme/widgets	running	running	event
+gitlab	acme/widgets/5006	acme/widgets	queued	manual	manual
+
+# status pushdown (unified -> GitLab statuses) and timing from the pipeline detail
+query TTTR
+SELECT run_id, queued_at, started_at, duration_seconds FROM gitlab.unified.runs WHERE pipeline = 'acme/widgets' AND status = 'success' ORDER BY run_id;
+----
+acme/widgets/5001	2026-10-01 09:01:00+00	2026-10-01 09:01:05+00	595.0
+acme/widgets/5004	2026-11-12 02:00:00+00	2026-11-12 02:00:30+00	570.0
+
+# A lower bound on started_at narrows the listing with updated_after.
+query T
+SELECT run_id FROM gitlab.unified.runs WHERE pipeline = 'acme/widgets' AND started_at >= TIMESTAMPTZ '2026-11-12 00:00:00+00' ORDER BY run_id;
+----
+acme/widgets/5004
+acme/widgets/5005
+
+# run_id = parses back into GET /projects/:id/pipelines/:pipeline_id
+query TTT
+SELECT run_id, status, url FROM gitlab.unified.runs WHERE run_id = 'acme/widgets/5002';
+----
+acme/widgets/5002	failed	https://gitlab.example.com/acme/widgets/-/pipelines/5002
+
+query I
+SELECT count(*) FROM gitlab.unified.runs WHERE run_id = 'acme/widgets/999999';
+----
+0
+
+query TTTTR
+SELECT task_run_id, task_name, status, raw_status, duration_seconds FROM gitlab.unified.task_runs WHERE run_id = 'acme/widgets/5002' ORDER BY task_run_id;
+----
+acme/widgets/5002/9000	rspec	failed	failed	20.0
+acme/widgets/5002/9001	build	success	success	120.0
+acme/widgets/5002/9002	lint	success	success	60.0
+acme/widgets/5002/9003	rspec	failed	failed	900.0
+acme/widgets/5002/9004	deploy	skipped	skipped	NULL
+
+query TT
+SELECT task_run_id, status FROM gitlab.unified.task_runs WHERE run_id = 'acme/widgets/5002' AND status = 'failed' AND attempt IS NULL ORDER BY task_run_id;
+----
+acme/widgets/5002/9000	failed
+acme/widgets/5002/9003	failed
+
+query T
+SELECT task_name FROM gitlab.unified.task_runs WHERE task_run_id = 'acme/widgets/5004/9012';
+----
+rspec
+
+# The cross-orchestrator columns and types, exactly.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM gitlab.unified.runs WHERE pipeline = 'x/y');
+----
+orchestrator	VARCHAR
+run_id	VARCHAR
+pipeline	VARCHAR
+status	VARCHAR
+raw_status	VARCHAR
+trigger	VARCHAR
+queued_at	TIMESTAMP WITH TIME ZONE
+started_at	TIMESTAMP WITH TIME ZONE
+ended_at	TIMESTAMP WITH TIME ZONE
+duration_seconds	DOUBLE
+url	VARCHAR
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM gitlab.unified.task_runs WHERE run_id = 'x/y/1');
+----
+orchestrator	VARCHAR
+run_id	VARCHAR
+task_run_id	VARCHAR
+task_name	VARCHAR
+status	VARCHAR
+raw_status	VARCHAR
+attempt	INTEGER
+started_at	TIMESTAMP WITH TIME ZONE
+ended_at	TIMESTAMP WITH TIME ZONE
+duration_seconds	DOUBLE
+url	VARCHAR
+
+statement ok
+DETACH gitlab;
+
+# ATTACH options give the tables a default scope.
+statement ok
+ATTACH 'gitlab' (TYPE vgi, LOCATION '{GITLAB_WORKER}', projects 'acme/widgets,acme/gadgets');
+
+query TI
+SELECT pipeline, count(*) FROM gitlab.unified.runs GROUP BY pipeline ORDER BY pipeline;
+----
+acme/gadgets	2
+acme/widgets	6
+
+query I
+SELECT count(*) FROM gitlab.unified.task_runs;
+----
+7
+
+# Task outcomes per pipeline, joined through the unified keys
+query TTI
+SELECT r.run_id, t.status, count(*) FROM gitlab.unified.task_runs t JOIN gitlab.unified.runs r USING (run_id) GROUP BY ALL ORDER BY ALL;
+----
+acme/widgets/5002	failed	2
+acme/widgets/5002	skipped	1
+acme/widgets/5002	success	2
+acme/widgets/5004	success	2
+
+statement ok
+DETACH gitlab;
+
+# group_path: every non-archived project of the group (acme/gadgets is archived).
+statement ok
+ATTACH 'gitlab' (TYPE vgi, LOCATION '{GITLAB_WORKER}', group_path 'acme');
+
+query TI
+SELECT pipeline, count(*) FROM gitlab.unified.runs GROUP BY pipeline ORDER BY pipeline;
+----
+acme/widgets	6
+
+# unified_status: the same mapping as a scalar (the catalog's executable example).
+query TT
+SELECT s, gitlab.unified.unified_status(s) FROM (VALUES ('canceled'), ('failed'), ('manual'), ('pending'), ('success'), (NULL), ('brand_new')) t(s) ORDER BY s NULLS LAST;
+----
+brand_new	queued
+canceled	cancelled
+failed	failed
+manual	queued
+pending	queued
+success	success
+NULL	NULL
+
+query T
+SELECT gitlab.unified.unified_status('manual', 'job');
+----
+skipped
+
+statement error
+SELECT gitlab.unified.unified_status('manual', 'stage');
+----
+<REGEX>:.*

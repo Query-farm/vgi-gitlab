@@ -1,0 +1,79 @@
+# Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it against reference_sql.
+# See https://github.com/Query-farm/vgi-lint-check (VGI920).
+#
+# Credential-gated: every task reads GitLab through a `gitlab` secret. The data is the
+# hand-built fixture instance (test/fixtures/gitlab_fixture.py replayed by
+# test/mock_api/server.py), which never changes, so reference results are deterministic.
+# Run --ai with
+#   CREATE SECRET (TYPE gitlab, TOKEN 'glpat-fixture', BASE_URL '<replay url>');
+tasks:
+  - name: open_bugs
+    reference_sql: >-
+      SELECT number, title FROM gitlab.main.issues('acme/widgets', labels := 'bug') WHERE state = 'open'
+    unordered: true
+  - name: merged_mrs
+    reference_sql: >-
+      SELECT count(*) AS merged, median(date_diff('hour', created_at, merged_at)) AS median_hours
+      FROM gitlab.main.merge_requests('acme/widgets') WHERE merged_at IS NOT NULL
+  - name: failed_pipelines
+    reference_sql: SELECT id, ref FROM gitlab.main.pipelines('acme/widgets') WHERE status = 'failed'
+    unordered: true
+  - name: job_errors
+    reference_sql: >-
+      SELECT message FROM gitlab.main.job_log('acme/widgets', 9003) WHERE message LIKE '%ERROR%'
+    unordered: true
+  - name: runs_per_status
+    reference_sql: >-
+      SELECT status, count(*) AS runs FROM gitlab.unified.runs WHERE pipeline = 'acme/widgets' GROUP BY status
+    unordered: true
+  - name: group_projects
+    check_sql: >-
+      SELECT (SELECT list(full_path) FROM gitlab.main.groups(parent := 'acme')) = ['acme/platform']
+      AND (SELECT count(*) FROM gitlab.main.projects('acme') WHERE NOT is_archived) = 2
+  - name: project_license
+    reference_sql: SELECT license_key, commit_count FROM gitlab.main.project('acme/widgets')
+  - name: maintainers
+    reference_sql: >-
+      SELECT login FROM gitlab.main.members('acme/widgets') WHERE access_level >= 40
+    unordered: true
+  - name: review_of_mr_1
+    check_sql: >-
+      SELECT (SELECT approved_by FROM gitlab.main.merge_request_approvals('acme/widgets', 1)) = ['carol']
+      AND (SELECT sum(additions) FROM gitlab.main.merge_request_diff_stats('acme/widgets', 1)) = 5
+      AND (SELECT count(DISTINCT user_login) FROM gitlab.main.merge_request_notes('acme/widgets', 1)
+           WHERE NOT is_system) = 2
+  - name: issue_1_comments
+    reference_sql: >-
+      SELECT user_login, body FROM gitlab.main.issue_notes('acme/widgets', 1) WHERE NOT is_system
+  - name: commit_authors
+    check_sql: >-
+      SELECT (SELECT count(*) FROM gitlab.main.commits('acme/widgets')
+              WHERE committer_date >= TIMESTAMPTZ '2026-11-01') = 3
+      AND (SELECT first(name ORDER BY contributions DESC) FROM gitlab.main.contributors('acme/widgets'))
+          = 'Alice Liddell'
+  - name: unreleased_tags
+    check_sql: >-
+      SELECT (SELECT list(name) FROM gitlab.main.tags('acme/widgets') WHERE NOT has_release) = ['v1.0.1']
+      AND (SELECT list(name) FROM gitlab.main.branches('acme/widgets') WHERE is_merged) = ['fix/cart-total']
+      AND (SELECT max(tag_name) FROM gitlab.main.releases('acme/widgets') WHERE NOT is_upcoming) = 'v1.1.0'
+  - name: slowest_job_step
+    check_sql: >-
+      SELECT (SELECT list(id) FROM gitlab.main.jobs('acme/widgets', pipeline_id := 5002) WHERE status = 'failed')
+             = [9003]
+      AND (SELECT arg_max(section, duration_seconds) FROM gitlab.main.job_log_sections('acme/widgets', 9003))
+          = 'step_script'
+  - name: production_deploys
+    check_sql: >-
+      SELECT (SELECT list(id) FROM gitlab.main.deployments('acme/widgets')
+              WHERE environment = 'production' AND status = 'success') = [43]
+      AND (SELECT count(*) FROM gitlab.main.environments('acme/widgets') WHERE state = 'available') = 2
+  - name: pipeline_task_runs
+    reference_sql: >-
+      SELECT task_name, status FROM gitlab.unified.task_runs WHERE run_id = 'acme/widgets/5002'
+    unordered: true
+  - name: normalize_statuses
+    reference_sql: >-
+      SELECT s AS raw_status, gitlab.unified.unified_status(s) AS status
+      FROM (VALUES ('canceled'), ('manual'), ('success')) t(s)
+    unordered: true

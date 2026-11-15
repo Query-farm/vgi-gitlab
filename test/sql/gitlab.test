@@ -1,0 +1,458 @@
+# name: test/sql/gitlab.test
+# description: The gitlab worker through DuckDB, against the GitLab replay in test/mock_api (strict about query parameters)
+# group: [gitlab]
+
+require vgi
+
+require-env GITLAB_WORKER
+
+require-env GITLAB_MOCK_API
+
+# Timestamps below are written in UTC.
+statement ok
+LOAD icu;
+
+statement ok
+SET TimeZone = 'UTC';
+
+statement ok
+ATTACH 'gitlab' (TYPE vgi, LOCATION '{GITLAB_WORKER}');
+
+# Without a token the replay answers 401 (only the single-project route is public).
+statement ok
+CREATE SECRET gl_anon (TYPE gitlab, BASE_URL '{GITLAB_MOCK_API}');
+
+statement error
+SELECT count(*) FROM gitlab.main.issues('acme/widgets');
+----
+<REGEX>:.*HTTP 401.*
+
+query TI
+SELECT full_name, stargazers_count FROM gitlab.main.project('acme/widgets');
+----
+acme/widgets	42
+
+# Lookups are blended: they take columns too, and a missing project is no row.
+query TI
+SELECT p.full_name, p.forks_count FROM (VALUES ('acme/widgets'), ('acme/nope')) t(path), LATERAL gitlab.main.project(t.path) p;
+----
+acme/widgets	7
+
+statement ok
+DROP SECRET gl_anon;
+
+statement ok
+CREATE SECRET gl (TYPE gitlab, TOKEN 'glpat-fixture', BASE_URL '{GITLAB_MOCK_API}', PER_PAGE 2);
+
+# ---------------------------------------------------------------- namespaces
+
+# Keyset pagination (per_page 2 => two pages, the second via a re-anchored Link header).
+query TTT
+SELECT full_path, visibility, html_url FROM gitlab.main.groups() ORDER BY full_path;
+----
+acme	public	https://gitlab.example.com/groups/acme
+acme/platform	internal	https://gitlab.example.com/groups/acme/platform
+
+query TI
+SELECT full_path, parent_id FROM gitlab.main.groups(parent := 'acme');
+----
+acme/platform	10
+
+# visibility pushdown
+query T
+SELECT full_path FROM gitlab.main.groups() WHERE visibility = 'internal';
+----
+acme/platform
+
+query TTTTT
+SELECT full_name, owner_login, owner_type, is_archived, is_private FROM gitlab.main.projects('acme') ORDER BY full_name;
+----
+acme/gadgets	acme	group	true	false
+acme/platform/api	acme/platform	group	false	true
+acme/widgets	acme	group	false	false
+
+# is_archived and last_activity_at go to the API (archived=false, last_activity_after=...).
+query T
+SELECT full_name FROM gitlab.main.projects('acme') WHERE NOT is_archived AND last_activity_at >= TIMESTAMPTZ '2026-11-13 00:00:00+00';
+----
+acme/widgets
+
+# A username: the group listing 404s, the user listing answers.
+query TTT
+SELECT full_name, is_fork, forked_from FROM gitlab.main.projects('alice');
+----
+alice/dotfiles	true	upstream/dotfiles
+
+# NULL: your memberships (keyset pagination over /projects)
+query IT
+SELECT id, visibility FROM gitlab.main.projects(NULL) ORDER BY id;
+----
+101	public
+102	internal
+103	private
+201	public
+
+query TTIII
+SELECT license_key, default_branch, commit_count, repository_size_bytes, open_issues_count FROM gitlab.main.project('acme/widgets');
+----
+mit	main	1234	5432100	3
+
+query TTITT
+SELECT source, login, access_level, access_level_name, expires_at FROM gitlab.main.members('acme/widgets') ORDER BY access_level DESC;
+----
+project	alice	50	owner	NULL
+project	bob	40	maintainer	NULL
+project	carol	30	developer	2027-01-01
+
+query TT
+SELECT source, login FROM gitlab.main.members('acme') WHERE login = 'bob';
+----
+group	bob
+
+query I
+SELECT count(*) FROM gitlab.main.members('acme/widgets', inherited := false);
+----
+1
+
+# ---------------------------------------------------------------- issues
+
+query ITTT
+SELECT number, title, state, gitlab_state FROM gitlab.main.issues('acme/widgets', labels := 'bug') WHERE state = 'open' ORDER BY number;
+----
+1	Wrong total in cart	open	opened
+5	Outage on checkout	open	opened
+
+query IT
+SELECT number, user_login FROM gitlab.main.issues('acme/widgets') WHERE user_login = 'alice' AND created_at >= TIMESTAMPTZ '2026-10-01 00:00:00+00' ORDER BY number;
+----
+2	alice
+4	alice
+
+query ITT
+SELECT number, closed_by_login, closed_at FROM gitlab.main.issues('acme/widgets') WHERE state = 'closed';
+----
+2	bob	2026-10-03 08:00:00+00
+
+query IIT
+SELECT number, comments, milestone FROM gitlab.main.issues('acme/widgets') WHERE number IN (1, 3) ORDER BY number;
+----
+1	1	v1.2
+3	3	NULL
+
+query ITT
+SELECT number, is_confidential, issue_type FROM gitlab.main.issues('acme/widgets') WHERE is_confidential OR issue_type = 'incident' ORDER BY number;
+----
+4	true	issue
+5	false	incident
+
+query T
+SELECT list_sort(labels)::VARCHAR FROM gitlab.main.issues('acme/widgets') WHERE number = 1;
+----
+[bug, frontend]
+
+# A group path: the project listing 404s, the group listing covers every project.
+query TI
+SELECT repo, count(*) FROM gitlab.main.issues('acme') WHERE state = 'open' GROUP BY repo ORDER BY repo;
+----
+acme/platform/api	1
+acme/widgets	4
+
+query I
+SELECT count(*) FROM gitlab.main.issues('acme/widgets', search := 'cart');
+----
+1
+
+query ITTT
+SELECT number, user_login, is_system, body FROM gitlab.main.issue_notes('acme/widgets', 1) ORDER BY id;
+----
+1	bob	false	Reproduced on Firefox.
+1	alice	true	changed the description
+
+# ---------------------------------------------------------- merge requests
+
+query ITTT
+SELECT number, state, gitlab_state, is_draft FROM gitlab.main.merge_requests('acme/widgets') ORDER BY number;
+----
+1	closed	merged	false
+2	open	opened	true
+3	closed	closed	false
+4	closed	merged	false
+
+query IT
+SELECT number, merged_by_login FROM gitlab.main.merge_requests('acme/widgets') WHERE gitlab_state = 'merged' ORDER BY number;
+----
+1	bob
+4	bob
+
+query IR
+SELECT count(*), median(date_diff('hour', created_at, merged_at)) FROM gitlab.main.merge_requests('acme/widgets') WHERE merged_at IS NOT NULL;
+----
+2	42.0
+
+query ITT
+SELECT number, head_ref, base_ref FROM gitlab.main.merge_requests('acme/widgets') WHERE head_ref = 'feature/dark-mode' AND base_ref = 'main' AND is_draft;
+----
+2	feature/dark-mode	main
+
+query IT
+SELECT number, requested_reviewers::VARCHAR FROM gitlab.main.merge_requests('acme/widgets') WHERE state = 'open' AND user_login = 'bob';
+----
+2	[carol]
+
+query I
+SELECT count(*) FROM gitlab.main.merge_requests('acme/widgets') WHERE updated_at > TIMESTAMPTZ '2026-11-12 08:00:00+00';
+----
+1
+
+query TTT
+SELECT user_login, is_resolvable, is_resolved FROM gitlab.main.merge_request_notes('acme/widgets', 1) WHERE NOT is_system ORDER BY created_at;
+----
+carol	true	true
+alice	false	NULL
+
+query TIIT
+SELECT is_approved, approvals_required, approvals_left, approved_by::VARCHAR FROM gitlab.main.merge_request_approvals('acme/widgets', 1);
+----
+true	1	0	[carol]
+
+query TTIIT
+SELECT new_path, is_new_file, additions, deletions, is_too_large FROM gitlab.main.merge_request_diff_stats('acme/widgets', 1) ORDER BY new_path;
+----
+app/cart.rb	false	2	1	false
+spec/cart_spec.rb	true	3	0	false
+vendor/big.min.js	false	NULL	NULL	true
+
+# LATERAL across merge requests
+query II
+SELECT m.number, a.approvals_left FROM gitlab.main.merge_requests('acme/widgets') m, LATERAL gitlab.main.merge_request_approvals(m.repo, m.number) a WHERE m.number = 1;
+----
+1	0
+
+# ---------------------------------------------------------- repository
+
+query TTT
+SELECT short_sha, title, author_name FROM gitlab.main.commits('acme/widgets') ORDER BY committer_date DESC LIMIT 2;
+----
+eeeeeeee	Merge branch 'perf/search'	Bob Builder
+dddddddd	Speed up search	Carol Danvers
+
+# committer_date range => since/until
+query T
+SELECT title FROM gitlab.main.commits('acme/widgets') WHERE committer_date >= TIMESTAMPTZ '2026-11-01 00:00:00+00' AND committer_date < TIMESTAMPTZ '2026-11-12 00:00:00+00' ORDER BY committer_date;
+----
+Fix cart total
+Speed up search
+
+query TII
+SELECT title, additions, deletions FROM gitlab.main.commits('acme/widgets', path := 'README.md', with_stats := true);
+----
+Add README	40	0
+
+query TI
+SELECT title, additions FROM gitlab.main.commits('acme/widgets', ref := 'perf/search') WHERE author_name = 'Alice Liddell' ORDER BY committer_date;
+----
+Initial commit	NULL
+Add README	NULL
+
+query I
+SELECT len(parent_shas) FROM gitlab.main.commits('acme/widgets', since := '2026-11-12T00:00:00Z');
+----
+2
+
+query TTTT
+SELECT name, is_default, is_protected, is_merged FROM gitlab.main.branches('acme/widgets') ORDER BY name;
+----
+feature/dark-mode	false	false	false
+fix/cart-total	false	false	true
+main	true	true	false
+
+query TT
+SELECT name, commit_sha[1:8] FROM gitlab.main.branches('acme/widgets') WHERE name = 'main';
+----
+main	eeeeeeee
+
+query TTT
+SELECT name, has_release, message FROM gitlab.main.tags('acme/widgets') ORDER BY name;
+----
+v1.0.0	true	First release
+v1.0.1	false	NULL
+v1.1.0	true	Release 1.1.0
+
+query T
+SELECT name FROM gitlab.main.tags('acme/widgets', search := '^v1.0') ORDER BY name;
+----
+v1.0.0
+v1.0.1
+
+query TTTIT
+SELECT tag_name, is_upcoming, author_login, assets_count, milestones::VARCHAR FROM gitlab.main.releases('acme/widgets') ORDER BY tag_name;
+----
+v1.0.0	false	alice	4	[v1.0]
+v1.1.0	false	bob	5	[]
+v2.0.0	true	alice	4	[v2.0]
+
+query TI
+SELECT name, contributions FROM gitlab.main.contributors('acme/widgets') ORDER BY contributions DESC, name;
+----
+Alice Liddell	3
+Bob Builder	1
+Carol Danvers	1
+
+# ---------------------------------------------------------- CI
+
+# List columns only: no per-pipeline detail requests.
+query ITTT
+SELECT id, status, source, ref FROM gitlab.main.pipelines('acme/widgets') ORDER BY id;
+----
+5001	success	api	main
+5002	failed	push	main
+5003	canceled	push	perf/search
+5004	success	schedule	main
+5005	running	merge_request_event	feature/dark-mode
+5006	manual	web	main
+
+# status / ref pushdown, plus detail columns (one GET /pipelines/:id each).
+query ITRRT
+SELECT id, user_login, duration_seconds, queued_duration_seconds, finished_at FROM gitlab.main.pipelines('acme/widgets') WHERE status = 'success' AND ref = 'main' ORDER BY id;
+----
+5001	bob	595.0	5.0	2026-10-01 09:11:00+00
+5004	alice	570.0	30.0	2026-11-12 02:10:00+00
+
+query IT
+SELECT id, name FROM gitlab.main.pipelines('acme/widgets') WHERE source = 'schedule';
+----
+5004	Nightly
+
+query I
+SELECT id FROM gitlab.main.pipelines('acme/widgets') WHERE status IN ('failed', 'canceled') AND updated_at >= TIMESTAMPTZ '2026-11-01 00:00:00+00' ORDER BY id;
+----
+5002
+5003
+
+query I
+SELECT id FROM gitlab.main.pipelines('acme/widgets') WHERE user_login = 'carol';
+----
+5003
+
+# A filter on a detail column the query does not select still gets its value.
+query I
+SELECT id FROM gitlab.main.pipelines('acme/widgets') WHERE duration_seconds > 1000;
+----
+5002
+
+query ITTTR
+SELECT id, name, stage, status, duration_seconds FROM gitlab.main.jobs('acme/widgets', pipeline_id := 5002) ORDER BY id;
+----
+9001	build	build	success	120.0
+9002	lint	test	success	60.0
+9003	rspec	test	failed	900.0
+9004	deploy	deploy	skipped	NULL
+
+query IT
+SELECT id, failure_reason FROM gitlab.main.jobs('acme/widgets', pipeline_id := 5002, include_retried := true) WHERE name = 'rspec' ORDER BY id;
+----
+9000	runner_system_failure
+9003	script_failure
+
+# pipeline_id and status from WHERE (scope[] pushdown)
+query IT
+SELECT id, runner_description FROM gitlab.main.jobs('acme/widgets') WHERE pipeline_id = 5002 AND status = 'failed';
+----
+9003	shared-runner-1
+
+# The whole project's jobs, keyset-paginated newest first.
+query I
+SELECT count(*) FROM gitlab.main.jobs('acme/widgets');
+----
+7
+
+query T
+SELECT list_sort(runner_tags)::VARCHAR FROM gitlab.main.jobs('acme/widgets') WHERE id = 9011;
+----
+[docker, linux]
+
+query IT
+SELECT line_number, message FROM gitlab.main.job_log('acme/widgets', 9003) WHERE message LIKE 'ERROR%' ORDER BY line_number;
+----
+11	ERROR: Cart#total rounds to cents (FAILED - 1)
+12	ERROR: expected 1.1, got 1.0999999
+15	ERROR: Job failed: exit code 1
+
+query ITT
+SELECT line_number, section, is_section_header FROM gitlab.main.job_log('acme/widgets', 9003) WHERE line_number BETWEEN 3 AND 5 ORDER BY line_number;
+----
+3	prepare_executor	true
+4	prepare_executor	false
+5	get_sources	true
+
+# Carriage-return progress output keeps what a terminal shows.
+query T
+SELECT message FROM gitlab.main.job_log('acme/widgets', 9003) WHERE message LIKE 'Receiving%';
+----
+Receiving objects: 100% (10/10), done.
+
+# No ANSI escapes and no section markers survive.
+query I
+SELECT count(*) FROM gitlab.main.job_log('acme/widgets', 9003) WHERE message LIKE '%' || chr(27) || '%' OR message LIKE '%section_%';
+----
+0
+
+query TRIIT
+SELECT section, duration_seconds, first_line, last_line, is_collapsed FROM gitlab.main.job_log_sections('acme/widgets', 9003) ORDER BY started_at;
+----
+prepare_executor	4.0	3	4	false
+get_sources	6.0	5	7	true
+step_script	90.0	8	13	false
+cleanup_file_variables	1.0	14	14	false
+
+query T
+SELECT header FROM gitlab.main.job_log_sections('acme/widgets', 9003) WHERE section = 'step_script';
+----
+Executing "step_script" stage of the job script
+
+# Timestamped runner logs: time and stream columns, '+' continuations joined.
+query ITTT
+SELECT line_number, timestamp, stream, message FROM gitlab.main.job_log('acme/widgets', 9011) WHERE stream = 'stderr';
+----
+4	2026-11-12 02:00:40+00	stderr	warning: deprecated flag --old
+
+query TT
+SELECT section, message FROM gitlab.main.job_log('acme/widgets', 9011) WHERE line_number = 5;
+----
+step_script	build ok
+
+# A job that does not exist (404) yields no rows, so a LATERAL over many jobs keeps going.
+query I
+SELECT count(*) FROM gitlab.main.job_log('acme/widgets', 424242);
+----
+0
+
+# LATERAL: the logs of every failed job of a pipeline.
+query IT
+SELECT j.id, l.message FROM gitlab.main.jobs('acme/widgets', pipeline_id := 5002) j, LATERAL gitlab.main.job_log(j.repo, j.id) l WHERE j.status = 'failed' AND l.message LIKE '%examples%';
+----
+9003	4 examples, 1 failure
+
+# ---------------------------------------------------------- deployments
+
+query TTTT
+SELECT name, tier, state, replace(html_url, '{GITLAB_MOCK_API}', '<base_url>') FROM gitlab.main.environments('acme/widgets') WHERE state = 'available' ORDER BY name;
+----
+production	production	available	<base_url>/acme/widgets/-/environments/31
+staging	staging	available	<base_url>/acme/widgets/-/environments/32
+
+query T
+SELECT name FROM gitlab.main.environments('acme/widgets') WHERE name = 'review/dark-mode';
+----
+review/dark-mode
+
+query IITTII
+SELECT id, iid, environment, status, job_name, pipeline_id FROM gitlab.main.deployments('acme/widgets') WHERE environment = 'production' ORDER BY id;
+----
+41	1	production	failed	deploy:production	5001
+43	3	production	success	deploy:production	5004
+
+query I
+SELECT id FROM gitlab.main.deployments('acme/widgets') WHERE status = 'success' AND updated_at >= TIMESTAMPTZ '2026-11-12 02:45:00+00';
+----
+43

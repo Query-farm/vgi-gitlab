@@ -1,0 +1,1 @@
+"""VGI gitlab worker package."""
