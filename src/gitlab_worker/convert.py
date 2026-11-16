@@ -28,7 +28,7 @@ def to_timestamp(value: Any) -> dt.datetime | None:
     else:
         try:
             parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (ValueError, OverflowError):
+        except ValueError, OverflowError:
             return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.UTC)
@@ -55,10 +55,10 @@ def to_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         try:
             return int(float(value))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
 
@@ -68,7 +68,7 @@ def to_float(value: Any) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -126,13 +126,13 @@ def _convert(values: list[Any], f: pa.Field[Any]) -> pa.Array[Any]:
         )
     try:
         return _array(values, t)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError):
+    except pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError:
         safe = []
         for v in values:
             try:
                 _array([v], t)
                 safe.append(v)
-            except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError):
+            except pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError:
                 safe.append(None)
         return _array(safe, t)
 

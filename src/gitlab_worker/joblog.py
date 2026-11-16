@@ -70,7 +70,7 @@ class Section:
 def _epoch(value: str) -> dt.datetime | None:
     try:
         return dt.datetime.fromtimestamp(int(value), tz=dt.UTC)
-    except (ValueError, OverflowError, OSError):
+    except ValueError, OverflowError, OSError:
         return None
 
 
