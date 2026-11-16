@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 (2026-11-16)
+
+- Require vgi-python `>=0.52.2,<0.53`; uv.lock re-locked.
+- Move to Python 3.14: `requires-python >=3.14`, CI, the Docker image and lint tooling target 3.14.
+
 ## 0.1.1
 
 - Catalog and schema docs are overviews instead of object lists, and schemas have their own one-line comments (vgi-lint 2.8: VGI173, VGI102).

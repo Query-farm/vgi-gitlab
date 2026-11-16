@@ -32,7 +32,7 @@ INSTALL vgi FROM community;   -- once per machine
 LOAD vgi;
 
 ATTACH 'gitlab' (TYPE vgi,
-  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.1.1 vgi-gitlab-worker');
+  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.1.2 vgi-gitlab-worker');
 
 SELECT full_name, stargazers_count, forks_count, license_key
 FROM gitlab.main.project('gitlab-org/gitlab-runner');
@@ -153,7 +153,7 @@ A GitLab instance has millions of pipelines, so these tables need a **scope**: f
 `pipeline = 'group/project'` (or `IN`), on `run_id` / `task_run_id`, or set it at ATTACH time:
 
 ```sql
-ATTACH 'gitlab' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.1.1 vgi-gitlab-worker',
+ATTACH 'gitlab' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.1.2 vgi-gitlab-worker',
                  projects 'gitlab-org/cli,gitlab-org/gitlab-runner');   -- or: group_path 'gitlab-org/ci-cd'
 
 SELECT r.pipeline, t.status, count(*) AS jobs
