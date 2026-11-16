@@ -117,18 +117,18 @@ CATALOG_DESCRIPTION = (
 )
 
 CATALOG_DOC_LLM = (
-    "Read-only GitLab REST API v4 access from DuckDB. Schema `main` has table functions that take a "
-    "project path such as 'gitlab-org/gitlab' (or a numeric id) as their first argument: issues, "
-    "merge_requests, merge_request_notes, merge_request_approvals, merge_request_diff_stats, issue_notes, "
-    "commits, branches, tags, releases, contributors, pipelines, jobs, job_log, job_log_sections, "
-    "environments, deployments, members; plus groups(), projects(namespace) and project(path). Column names "
-    "follow the vgi-github worker where the concepts match (repo, number, user_login, html_url, head_ref, "
-    "base_ref, merged_at, ...) and state is normalized to 'open'/'closed' (GitLab's own value is in "
-    "gitlab_state), so `UNION ALL BY NAME` with GitHub data works. WHERE filters on state, author, labels, "
-    "dates, status, ref and similar columns are sent to the API. Schema `unified` has the cross-orchestrator "
-    "tables runs (one row per pipeline) and task_runs (one row per job); they need a project scope from a "
-    "`pipeline =` / `run_id =` filter or the ATTACH options `projects` / `group_path`. Credentials: an optional "
-    "`gitlab` secret (token, base_url); without one, public gitlab.com data is read anonymously."
+    "Read-only GitLab REST API v4 access from DuckDB, for gitlab.com or a self-managed instance. Schema "
+    "`main` has table functions over GitLab's resources - groups and projects, issues and merge requests "
+    "with their notes and approvals, repository history and releases, CI/CD pipelines, jobs and job logs, "
+    "environments and deployments. Most take a project path such as 'gitlab-org/gitlab' (or a numeric id) "
+    "as their first argument. Column names follow the vgi-github worker where the concepts match (repo, "
+    "number, user_login, html_url, head_ref, base_ref, merged_at, ...) and state is normalized to "
+    "'open'/'closed' (GitLab's own value is in gitlab_state), so `UNION ALL BY NAME` with GitHub data works. "
+    "WHERE filters on state, author, labels, dates, status, ref and similar columns are sent to the API. "
+    "Schema `unified` has cross-orchestrator run tables (one row per pipeline or job) that need a project "
+    "scope from a `pipeline =` / `run_id =` filter or the ATTACH options `projects` / `group_path`. "
+    "Credentials: an optional `gitlab` secret (token, base_url); without one, public gitlab.com data is read "
+    "anonymously."
 )
 
 CATALOG_DOC_MD = (
