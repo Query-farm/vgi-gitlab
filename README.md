@@ -22,6 +22,8 @@ with `UNION ALL BY NAME`. Pipelines and jobs are also served in the cross-orches
 `unified.runs` / `unified.task_runs` shape shared with the Airflow, Dagster, Prefect, Temporal,
 Databricks and dbt workers.
 
+vgi-gitlab 0.2.0 speaks VGI protocol 3.4, so it needs Haybarn 2.0.1 or newer (Haybarn 2.0.0 loads a 3.3 `vgi` extension that cannot attach it).
+
 ## Get started
 
 You need [DuckDB](https://duckdb.org) (or [Haybarn](https://query.farm)) and
@@ -32,7 +34,7 @@ INSTALL vgi FROM community;   -- once per machine
 LOAD vgi;
 
 ATTACH 'gitlab' (TYPE vgi,
-  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.1.2 vgi-gitlab-worker');
+  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.2.0 vgi-gitlab-worker');
 
 SELECT full_name, stargazers_count, forks_count, license_key
 FROM gitlab.main.project('gitlab-org/gitlab-runner');
@@ -153,7 +155,7 @@ A GitLab instance has millions of pipelines, so these tables need a **scope**: f
 `pipeline = 'group/project'` (or `IN`), on `run_id` / `task_run_id`, or set it at ATTACH time:
 
 ```sql
-ATTACH 'gitlab' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.1.2 vgi-gitlab-worker',
+ATTACH 'gitlab' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-gitlab@v0.2.0 vgi-gitlab-worker',
                  projects 'gitlab-org/cli,gitlab-org/gitlab-runner');   -- or: group_path 'gitlab-org/ci-cd'
 
 SELECT r.pipeline, t.status, count(*) AS jobs
